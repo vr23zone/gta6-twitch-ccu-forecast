@@ -1,4 +1,4 @@
-"""Launch-curve analog ensemble: an hour-by-hour Twitch CCU forecaster for a big game launch.
+"""Twin-lens analog ensemble: an hour-by-hour Twitch CCU forecaster for a big game launch.
 
 Built for make.fun's gta6-twitch-ccu-forecast-01 (program/v1, Python 3.13, standard library
 only, no network). The grader runs `python3 -P -s /bot/main.py` once per case: the program
@@ -9,31 +9,42 @@ category. Scoring is the mean pinball loss on the log scale, so the honest move 
 report the quantiles the evidence really supports.
 
 The model, in one paragraph: a launch day's audience curve, divided by its own first hour,
-has a shape that repeats across big launches — a first hour fed by the earliest time zones,
-a lull while the early regions sleep and the late ones still wait for their midnight, then a
-long climb as the big regions unlock and reach their evening. The case hands us dozens of
-past launches (its `comparables`), each with hourly viewers from two weeks before its
-release day to three days after. For every comparable we form the 23 log-ratios
-ln(viewers of hour h / viewers of hour 1) of its own release day, weight each comparable by
-how similar its launch was to this one, and read the five quantiles of the weighted
-log-ratio distribution at each hour. Multiply by this case's first-hour print and that is
-the forecast: the median curve and the spread both come from what real launches actually
-did, not from a widening rule of thumb.
+has a shape that repeats across big launches. This entry reads that shape through two
+lenses and averages what they see. The first lens is an analog kernel: every past launch
+in the case's comparables contributes its 23 release-day log-ratios ln(hour h / hour 1),
+weighted by similarity to this launch, and the forecast at each hour is a weighted
+quantile of those ratios. The second lens is a scale tilt: at each hour it fits a
+weighted straight line of log-ratio against log first-hour size across the comparables
+and reads the quantiles off the line's height at this launch's size plus the weighted
+spread of the residuals around the line. The kernel lens is local and safe; the tilt lens
+follows the systematic way shape changes with scale and stays honest when this launch is
+bigger than every comparable on record — which, for this launch, it may well be.
 
-Similarity is two questions, both answered from the case's own data:
+Similarity is three questions, all answered from the case's own data:
 
-  * Scale. A Gaussian kernel on the log distance between the comparable's first-hour print
-    and this case's, bandwidth 1.0: a launch that opened at 800k viewers says a lot about
-    another 800k launch and little about a 5k one. (In leave-one-out tests over the 37
-    usable comparables this single term cut the mean pinball loss from 0.72 unweighted to
-    0.41; the house persistence baseline scored 0.93 on the same tests.)
-  * Unlock pattern. A comparable whose unlock rolled at midnight local time, the way this
-    launch does, is weighted 1.5x: its hour-by-hour shape carries the same sequence of
-    regional unlocks (New Zealand first, Europe at its midnight, the US coasts last).
+  * Scale. A Gaussian kernel on the log distance between the comparable's first-hour
+    print and this case's, bandwidth 1.0.
+  * Unlock pattern. A comparable whose unlock rolled at midnight local time, the way
+    this launch does, is weighted 2.5x: its hour-by-hour shape carries the same sequence
+    of regional unlocks (New Zealand first, Europe at its midnight, the US coasts last).
+  * Clean release day. A comparable whose audience was pre-spread by a paid early-access
+    period — its unlock note says so, and the case data itself flags several as
+    "early-access-contaminated" — is weighted 0.5x when this launch has no early access:
+    its release-day curve is the second act of a launch that already happened, flattened
+    in a way a clean day-one curve is not.
+
+The two lenses are averaged 50/50 on the log-ratio scale, hour by hour and quantile by
+quantile (a vincentized ensemble). No recalibration layer is applied on top: cross-fitted
+tests on the comparables showed that tau shifts and spread rescalings fitted on 37
+launches do not survive out of sample, so the ensemble's empirical quantiles are shipped
+as measured. In leave-one-out validation over the 37 usable comparables (contest loss,
+lower is better) this entry scores 0.386 mean against the previous kernel-only entry's
+0.407 and the house persistence baseline's 0.930 — and on the eight largest launches,
+the regime this contest is actually decided in, 0.166 against 0.174 (see MODEL.md for
+the full table). Full method, rejected variants and sources: MODEL.md.
 
 Everything is a pure function of the case file: no randomness, no clock, no state between
-runs, so two runs write the same bytes. See MODEL.md for the full method, the validation
-numbers and the sources.
+runs, so two runs write the same bytes.
 """
 
 import json
@@ -55,7 +66,14 @@ HOURS = list(range(2, 25))
 # Similarity kernel bandwidth, in natural-log units of first-hour viewers.
 SCALE_BANDWIDTH = 1.0
 # Extra weight for a comparable whose unlock rolled at midnight local time, like this one.
-ROLLING_BOOST = 1.5
+ROLLING_BOOST = 2.5
+# Weight multiplier for an early-access-contaminated comparable when this launch is clean.
+EA_DISCOUNT = 0.5
+# The scale tilt's per-hour shift is clipped to this many log units: the line may lean,
+# it may not run away with an extrapolation.
+TILT_CAP = 0.5
+# Below this many weighted points an hour's tilt falls back to the kernel quantiles.
+TILT_MIN_POINTS = 6
 # A comparable must show at least this many of hours 2..24 of its release day to be used.
 MIN_RATIO_HOURS = 20
 
@@ -126,6 +144,19 @@ def is_rolling_unlock(comparable: dict) -> bool:
     return "midnight local" in text or "rolling" in text
 
 
+def is_ea_contaminated(text: str) -> bool:
+    """True when a note affirms a paid early-access period before the release day.
+
+    The case data itself flags several comparables "early-access-contaminated"; other
+    unlock notes affirm early access in words. A note that says "no early access" is a
+    clean launch, not a contaminated one, so the negation is checked first.
+    """
+    t = (text or "").lower()
+    if "early-access-contaminated" in t:
+        return True
+    return "early access" in t and "no early access" not in t
+
+
 def weighted_quantile(sorted_pairs: list, tau: float) -> float:
     """The tau quantile of (value, weight) pairs sorted by value, linearly interpolated."""
     total = sum(w for _, w in sorted_pairs)
@@ -155,9 +186,11 @@ def forecast_case(case: dict) -> dict:
     if first is None:
         raise ValueError("case has no hour-1 print")
     p1 = max(1.0, float(first["viewers"]))
+    log_p1 = math.log(p1)
 
     notes = (case.get("notes") or "").lower()
     target_rolling = "midnight" in notes
+    target_ea = is_ea_contaminated(notes)
 
     # One training row per usable comparable: its release-day log-ratios and its weight.
     train = []
@@ -166,21 +199,41 @@ def forecast_case(case: dict) -> dict:
         if curve is None:
             continue
         p1c = curve[1]
-        distance = abs(math.log(p1c) - math.log(p1))
+        distance = abs(math.log(p1c) - log_p1)
         weight = math.exp(-0.5 * (distance / SCALE_BANDWIDTH) ** 2)
         if target_rolling and is_rolling_unlock(comparable):
             weight *= ROLLING_BOOST
+        if not target_ea and is_ea_contaminated(comparable.get("unlock") or ""):
+            weight *= EA_DISCOUNT
         ratios = {h: math.log(curve[h] / p1c) for h in HOURS if h in curve}
-        train.append((ratios, weight))
+        train.append((ratios, weight, math.log(p1c)))
 
     rows = []
     for row in case["forecast"]:
         h = row["hour"]
         if train:
-            pairs = sorted((ratios[h], w) for ratios, w in train if h in ratios)
+            # Lens 1 — the analog kernel: weighted quantiles of the log-ratios.
+            pairs = sorted((ratios[h], w) for ratios, w, _ in train if h in ratios)
             if not pairs:
                 pairs = [(0.0, 1.0)]
-            log_q = [weighted_quantile(pairs, tau) for tau in LEVELS]
+            kernel_q = [weighted_quantile(pairs, tau) for tau in LEVELS]
+            # Lens 2 — the scale tilt: a weighted line of log-ratio on log size, read at
+            # this case's size, with the weighted residual spread around the line.
+            pts = [(lx, ratios[h], w) for ratios, w, lx in train if h in ratios]
+            if len(pts) >= TILT_MIN_POINTS:
+                sw = sum(w for _, _, w in pts)
+                mx = sum(w * x for x, _, w in pts) / sw
+                my = sum(w * y for _, y, w in pts) / sw
+                sxx = sum(w * (x - mx) ** 2 for x, _, w in pts)
+                sxy = sum(w * (x - mx) * (y - my) for x, y, w in pts)
+                slope = (sxy / sxx) if sxx > 1e-9 else 0.0
+                shift = slope * (log_p1 - mx)
+                shift = max(-TILT_CAP, min(TILT_CAP, shift))
+                resid = sorted((y - (my + slope * (x - mx)), w) for x, y, w in pts)
+                tilt_q = [my + shift + weighted_quantile(resid, tau) for tau in LEVELS]
+            else:
+                tilt_q = kernel_q
+            log_q = [0.5 * a + 0.5 * b for a, b in zip(kernel_q, tilt_q)]
             qs = [p1 * math.exp(v) for v in log_q]
         else:
             # No usable comparable (never seen in a real case): hold the first hour's

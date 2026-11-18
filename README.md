@@ -1,4 +1,4 @@
-# GTA VI Twitch CCU Forecast — Launch-Curve Analog Ensemble
+# GTA VI Twitch CCU Forecast — Twin-Lens Analog Ensemble
 
 [![make.fun · gta6-twitch-ccu-forecast-01](https://make.fun/badge/gta6-twitch-ccu-forecast-01.svg)](https://make.fun/bounty/gta6-twitch-ccu-forecast-01?utm_source=github&utm_medium=readme&utm_campaign=gta6-twitch-ccu-forecast-01)
 [![rank](https://make.fun/badge/gta6-twitch-ccu-forecast-01/vr23zone/gta6-twitch-ccu-forecast/rank.svg)](https://make.fun/bounty/gta6-twitch-ccu-forecast-01/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=gta6-twitch-ccu-forecast-01)
@@ -16,17 +16,23 @@ the log scale.
 
 A launch day divided by its own first hour has a shape that repeats: an early-regions
 first hour, a lull while they sleep and the Americas wait for midnight, then a long climb
-into the transatlantic evening. This entry is an **analog ensemble**: it takes the
-release-day log-ratios `ln(hour h / hour 1)` of every past launch in the case's
-comparables, weights each launch by similarity — a Gaussian kernel on the log distance
-between first-hour prints (bandwidth 1.0), with a 1.5× boost for launches whose unlock
-rolled at midnight local time like this one — and reads the five quantiles of the
-weighted distribution at each hour. The median curve and the spread both come from what
-real launches did, not from a widening rule of thumb.
+into the transatlantic evening. This entry reads that shape through **two lenses and
+averages them**. The *analog kernel* takes the release-day log-ratios
+`ln(hour h / hour 1)` of every past launch in the case's comparables and reads weighted
+quantiles of them, weighting each launch by similarity — a Gaussian kernel on the log
+distance between first-hour prints (bandwidth 1.0), a 2.5× boost for launches whose
+unlock rolled at midnight local time like this one, and a 0.5× discount for launches
+whose audience was pre-spread by a paid early-access period (this launch has none). The
+*scale tilt* fits, at each hour, a weighted line of log-ratio against log first-hour
+size and reads the quantiles off the line's height at this launch's size plus the
+residual spread — the lens that stays honest when a launch opens above every comparable
+on record, as this one may. The median curve and the spread both come from what real
+launches did, not from a widening rule of thumb.
 
 Leave-one-out validation over the 37 usable comparables (contest loss, lower is better):
-house persistence baseline 0.930 mean / 0.325 median · unweighted analogs 0.716 ·
-**this model 0.407 mean / 0.240 median**. Full method, rejected variants and sources:
+house persistence baseline 0.930 mean / 0.325 median · previous entry 0.407 mean ·
+**this entry 0.386 mean** — and on the eight largest launches, the regime this contest
+is decided in, 0.174 → **0.166**. Full method, rejected variants and sources:
 [MODEL.md](MODEL.md).
 
 ## Run it
